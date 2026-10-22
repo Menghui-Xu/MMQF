@@ -39,7 +39,7 @@ The YAML pins MKL and Intel OpenMP to avoid the `libtorch_cpu.so: undefined symb
 MMQF/
 ├── main.py                         # Training and evaluation entry point
 ├── model.py                        # Model definitions
-├── Run_00.py                       # Local batch launcher; see Section 6
+├── Run_00.py                       # Local batch launcher;
 ├── environment_server.yaml         # Conda environment
 ├── Deng/
 │   ├── 0/
