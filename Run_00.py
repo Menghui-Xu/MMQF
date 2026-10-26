@@ -7,7 +7,7 @@ import subprocess
 import csv
 
 conda_path = '/home/ubuntu/anaconda3/bin/conda'
-script_path = '/home/ubuntu/xmh/AGDA改进/main.py'
+script_path = '/home/ubuntu/xmh/MMQF/main.py'
 
 
 
@@ -31,9 +31,16 @@ seed = 0
 for fold in folds:
             cmd = [conda_path, 'run', '-n', env_name, '--no-capture-output', 'python', script_path, '--dropout',str(Deng['dropout']),
                    '--rels', str(Deng['rels']), '--graph_alpha', str(Deng['graph_alpha']), '--min_sim', str(Deng['min_sim']),
-                   '--w_cl', str(Deng['w_cl']), '--lr', str(Deng['lr']), '--dataset', Deng['dataset'], '--model', "Model_WO_RGCN",
-                   '--batch_size',str(Deng['batch_size']), '--temperature',str(Deng['temperature']),'--n_epochs', str(400),
+                   '--w_cl', str(Deng['w_cl']), '--lr', str(Deng['lr']), '--dataset', Deng['dataset'],
+                   '--batch_size',str(Deng['batch_size']), '--temperature',str(Deng['temperature']),
                    '--gpu_id', str(gpu), '--fold', str(fold), '--seed',str(seed),
-                   '--filename', f"result/{gpu}_Deng_cold1.csv", ]
+                   '--filename', f"result/Deng.csv", ]
+
+            cmd = [conda_path, 'run', '-n', env_name, '--no-capture-output', 'python', script_path, '--dropout',str(Lin['dropout']),
+                   '--rels', str(Lin['rels']), '--graph_alpha', str(Lin['graph_alpha']), '--min_sim', str(Lin['min_sim']),
+                   '--w_cl', str(Lin['w_cl']), '--lr', str(Lin['lr']), '--dataset', Lin['dataset'],
+                   '--batch_size',str(Lin['batch_size']), '--temperature',str(Lin['temperature']),
+                   '--gpu_id', str(gpu), '--fold', str(fold), '--seed',str(seed),
+                   '--filename', f"result/Lin.csv", ]
             subprocess.run(cmd, check=True)
 
