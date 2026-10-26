@@ -80,5 +80,5 @@ Each split CSV contains `Drug1`, `Drug2`, and `Label`. Drug indices are zero-bas
 | `<seed>/<fold>/train.csv` | Training drug pairs |
 | `<seed>/<fold>/test.csv` | Test drug pairs |
 
-The necessary precomputed inputs are included, so no preprocessing or MolFormer model download is required to run the supplied experiments. Keep these files together and preserve their indexing. `ChemBERTa_smiles_features.pt` and `brics_drug_list.pkl`, where present, are not loaded by the current training entry point.
+The necessary precomputed inputs are included, so no preprocessing or MolFormer model download is required to run the supplied experiments. Keep these files together and preserve their indexing. 
 
