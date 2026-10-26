@@ -11,9 +11,8 @@ import torch.nn.functional as F
 from rdkit import Chem
 from sklearn.metrics import roc_auc_score, auc, precision_recall_curve, f1_score, precision_score, recall_score
 from sklearn.preprocessing import label_binarize
-# 数据预处理，如 label_binarize 将多类标签转为二值矩阵
 from torch.utils.data import Dataset, DataLoader
-from model import Model_F1_C_S2,Model_F1_C_S2_new
+from model import MMQF
 
 '''Code for multi-class DDI prediction'''
 # 创建了一个 ArgumentParser 对象，用于处理命令行参数。
@@ -22,10 +21,10 @@ parser.add_argument('--gpu_id', type=int, default=0, help='which GPU card to use
 parser.add_argument('--hidden_dim', type=int, default=512, help='num of hidden features')  ##隐藏层的维度，即神经网络中隐藏层的节点数。
 parser.add_argument('--out_dim', type=int, default=256, help='num of output features')  # 输出层的维度，即模型输出的特征数。
 parser.add_argument('--dropout', type=float, default=0.5,help='dropout rate')  # Dropout 率，用于防止过拟合的一种正则化技术，通过随机丢弃一部分神经元来实现。
-parser.add_argument('--rels', type=int, default=65,help='num of relations')  #, choices=[65,86,100] 关系的数量，可能用于定义模型中的关系类型或类别数
-parser.add_argument('--n_epochs', type=int, default=400, help='num of epochs')  # ,choices=[400,200,300,1]训练的轮数，即整个训练数据集被遍历的次数。
+parser.add_argument('--rels', type=int, default=65,help='num of relations')  
+parser.add_argument('--n_epochs', type=int, default=400, help='num of epochs')  
 parser.add_argument('--batch_size', type=int, default=2048, help='batch size')  # 批量大小，即每次训练时使用的样本数量
-parser.add_argument('--model', default='Model_F1_C_S2_new', type=str)  # 模型的类型，用于选择不同的模型架构
+parser.add_argument('--model', default='MMQF', type=str)  # 模型的类型，用于选择不同的模型架构
 parser.add_argument('--filename', type=str, default='result.csv', help='folder to save results.csv')
 parser.add_argument('--graph_alpha', type=float, default=0.6)#,choices=[0.6,0.7]
 parser.add_argument('--min_sim', type=float, default=0.6)#,choices=[0.6,0.7]
@@ -378,19 +377,9 @@ train_loader = DataLoader(dataset=train_dataset, shuffle=True, batch_size=args.b
 test_loader = DataLoader(dataset=test_dataset, batch_size=args.batch_size)
 
 
-if args.model == 'Model_F1_C_S2':
-    model = Model_F1_C_S2(
-        args=args,
-        frag_graphs=frag_graphs_gpu,
-        node_feat_dim=brics_data['node_feat_dim'],
-        edge_feat_dim=brics_data['edge_feat_dim'],
-        frag_hidden_dim=128,
-        frag_output_dim=256,
-        cross_hidden_dim=256,
-        cross_heads=4
-    )
-elif args.model == 'Model_F1_C_S2_new':
-    model = Model_F1_C_S2_new(
+
+if args.model == 'MMQF':
+    model = MMQF(
         args=args,
         frag_graphs=frag_graphs_gpu,
         node_feat_dim=brics_data['node_feat_dim'],
@@ -463,17 +452,12 @@ def train_():
             running_loss += total_loss.item()
         print(f"epoch {epoch + 1}/{num_epochs};trainging loss: {running_loss / n_iterations:.4f} ;training set acc: {running_correct / total_samples:.4f}")
 
-        # --- 验证阶段 ---
-        if num_epochs == 1 or (epoch+1)  in (1,300,350,400) :
-            current_val_f1 = test_(test_loader, epoch+1)
-            print(f"Epoch {epoch + 1}/{args.n_epochs} | Loss: {running_loss / len(train_loader):.4f} | Val F1: {current_val_f1:.4f}")
-    # test_(test_loader , args.n_epochs)
+    test_(test_loader , args.n_epochs)
 
 
 # y_true = np.array([[0, 1], [1, 0], [0, 1]])  # 2个类别的真实标签
 # y_score = np.array([[0.2, 0.8], [0.6, 0.4all.csv], [0.3, 0.7]]) # 预测概率
 def roc_aupr_score(y_true, y_score, average="macro"):
-    # 计算二分类问题的ROC-AUC和PR-AUC分数
     def _binary_roc_aupr_score(y_true, y_score):
         precision, recall, _ = precision_recall_curve(y_true, y_score)
         return auc(recall, precision)
