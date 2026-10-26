@@ -164,7 +164,7 @@ class SemanticEncoderV3_Dense(nn.Module):
 
 
 # ============================================================
-# 基础组件：GIN Fragment Encoder（含各种优化选项）
+# 基础组件：GIN Fragment Encoder
 # ============================================================
 
 class BaseGINFragmentEncoder(nn.Module):
@@ -233,73 +233,6 @@ class BaseGINFragmentEncoder(nn.Module):
 
 
 
-# ============================================================
-# 优化5: Jumping Knowledge（跳接）
-# ============================================================
-
-class GINFragmentEncoder_JK(BaseGINFragmentEncoder):
-    """
-    Jumping Knowledge: 拼接所有GIN层的输出
-    """
-
-    def __init__(self, frag_graphs, node_feat_dim=6, edge_feat_dim=5,
-                 hidden_dim=128, output_dim=256, dropout=0.3):
-        super().__init__(frag_graphs, node_feat_dim, edge_feat_dim, hidden_dim, output_dim, dropout)
-
-        # 重写GIN结构
-        self.gin1 = GINConv(nn.Sequential(
-            nn.Linear(node_feat_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        ))
-        self.gin2 = GINConv(nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim)
-        ))
-        # JK投影层：hidden_dim*2 → output_dim
-        self.proj = nn.Linear(hidden_dim * 2, output_dim)
-        self.dropout = nn.Dropout(dropout)
-
-        self.register_buffer("frag_embeddings", torch.zeros(self.num_frags, output_dim))
-        self._build_embeddings_jk()
-
-    @torch.no_grad()
-    def _build_embeddings_jk(self):
-        """JK: 拼接所有层输出"""
-        for i in range(self.num_frags):
-            g = self.frag_graphs[i]
-            x = g["x"]
-            edge_index = g["edge_index"]
-            if x.device != self.frag_embeddings.device:
-                x = x.to(self.frag_embeddings.device)
-                edge_index = edge_index.to(self.frag_embeddings.device)
-
-            h1 = self.gin1(x, edge_index)
-            h1 = F.relu(h1)
-            h1 = self.dropout(h1)
-
-            h2 = self.gin2(h1, edge_index)
-            h2 = F.relu(h2)
-
-            batch = torch.zeros(h1.size(0), dtype=torch.long, device=h1.device)
-            h1_pool = global_mean_pool(h1, batch)
-            h2_pool = global_mean_pool(h2, batch)
-
-            # 拼接 + 投影
-            h = self.proj(torch.cat([h1_pool, h2_pool], dim=-1))
-            self.frag_embeddings[i] = h.squeeze()
-        print(f"✔ JK GIN Fragment table built: {self.frag_embeddings.shape}")
-
-    def forward(self, fragment_indices, fragment_mask):
-        frag_tokens = self.frag_embeddings[fragment_indices]
-        frag_tokens = frag_tokens * fragment_mask.unsqueeze(-1)
-
-        denom = fragment_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-        h_frag_pooled = frag_tokens.sum(dim=1) / denom
-
-        return frag_tokens, h_frag_pooled
-
 
 
 
@@ -308,7 +241,7 @@ class GINFragmentEncoder_JK(BaseGINFragmentEncoder):
 
 
 # ============================================================
-# 优化2: Multi-Query Cross-Attention (K=4)
+#Multi-Query Cross-Attention (K=4)
 # ============================================================
 
 class MultiQueryCrossAttentionFusion(nn.Module):
@@ -398,129 +331,15 @@ class EnhancedPairPredictor(nn.Module):
 
 
 
+
+
+
+
 # ============================================================
-# 三模块组合：F1 + C + S2（JK + MultiQuery + Dense）
+#  Jumping Knowledge
 # ============================================================
-
-class Model_F1_C_S2(nn.Module):
-    """F1 (JK) + C (MultiQuery) + S2 (Dense)"""
-    def __init__(self, args, frag_graphs, node_feat_dim=6, edge_feat_dim=5,
-                 frag_hidden_dim=128, frag_output_dim=256,
-                 cross_hidden_dim=256, cross_heads=4, num_queries=4):
-        super().__init__()
-
-        self.semantic_encoder = SemanticEncoderV3_Dense(
-            input_dim=args.smiles_input_dim,
-            hidden_dim=args.hidden_dim,
-            dropout=args.dropout
-        )
-
-        self.fragment_encoder = GINFragmentEncoder_JK(
-            frag_graphs=frag_graphs,
-            node_feat_dim=node_feat_dim,
-            edge_feat_dim=edge_feat_dim,
-            hidden_dim=frag_hidden_dim,
-            output_dim=frag_output_dim,
-            dropout=args.dropout
-        )
-
-        self.cross_fusion = MultiQueryCrossAttentionFusion(
-            sem_dim=1792,
-            frag_dim=frag_output_dim,
-            hidden_dim=cross_hidden_dim,
-            num_heads=cross_heads,
-            num_queries=num_queries,
-            dropout=args.dropout
-        )
-
-        self.rgcn = R_GCN(
-            num_feat=1792,
-            num_hidden=args.hidden_dim,
-            num_outputs=args.out_dim,
-            dropout=args.dropout,
-            rels=args.rels + 1
-        )
-
-        self.projection = nn.Sequential(
-            nn.Linear(1792, 512), nn.ELU(), nn.Dropout(args.dropout),
-            nn.Linear(512, args.out_dim), nn.LayerNorm(args.out_dim)
-        )
-
-        self.predictor = EnhancedPairPredictor(
-            input_dim=args.out_dim, num_classes=args.rels, dropout=args.dropout
-        )
-
-        self.sem_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-        self.graph_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-        self.frag_cons_proj = nn.Sequential(nn.Linear(frag_output_dim, 512), nn.ELU(), nn.Linear(512, 256))
-
-        self.temperature = args.temperature
-
-    def forward(self, unified_edge_index, unified_edge_type, smiles_matrix,
-                fragment_indices, fragment_idfs, fragment_mask, triples):
-
-        h_sem, _ = self.semantic_encoder(smiles_matrix)
-        frag_tokens, h_frag_pooled = self.fragment_encoder(fragment_indices, fragment_mask)
-
-        # h_fused, _ = self.cross_fusion(h_sem, frag_tokens, fragment_mask)
-        h_fused, attn_weights = self.cross_fusion(h_sem, frag_tokens, fragment_mask)
-
-        h_graph = self.rgcn(h_fused, unified_edge_index, unified_edge_type)
-        node_emb_proj = self.projection(h_graph)
-
-        z_sem = self.sem_cons_proj(h_sem)
-        z_graph = self.graph_cons_proj(h_graph)
-        z_frag = self.frag_cons_proj(h_frag_pooled)
-
-        triples = triples.long()
-        # h = node_emb_proj[triples[:, 0]]
-        # t = node_emb_proj[triples[:, 1]]
-        # output = self.predictor(h, t)
-        #
-        # return output, (z_sem, z_graph, z_frag)
-        h = node_emb_proj[triples[:, 0]]
-        t = node_emb_proj[triples[:, 1]]
-
-        pair_embedding = torch.cat([h, t, torch.abs(h - t), h * t], dim=-1)
-
-        output = self.predictor(h, t)
-
-        return output, (z_sem, z_graph, z_frag, pair_embedding, attn_weights)
-
-
-
-
-
 
 class GINFragmentEncoder_JK1(nn.Module):
-    """
-    可端到端训练的JK-GIN片段编码器。
-
-    输入：
-        frag_graphs:
-            所有BRICS片段图组成的列表。
-            每个元素包含:
-                x           原子节点特征
-                edge_index  化学键连接关系
-                edge_attr   化学键特征，当前版本暂不使用
-
-        fragment_indices:
-            shape = [num_drugs, max_fragments]
-            每个药物包含的片段编号
-
-        fragment_mask:
-            shape = [num_drugs, max_fragments]
-            标记有效片段和补零位置
-
-    输出：
-        frag_tokens:
-            shape = [num_drugs, max_fragments, output_dim]
-            每个药物对应的片段token
-
-        h_frag_pooled:
-            shape = [num_drugs, output_dim]
-            每个药物的平均片段表示
-    """
 
     def __init__(
         self,
@@ -552,9 +371,6 @@ class GINFragmentEncoder_JK1(nn.Module):
 
         frag_batch = Batch.from_data_list(frag_data_list)
 
-        # 将固定的片段图数据注册为buffer：
-        # 它们会随model.to(device)一起移动，
-        # 但不会被优化器更新。
         self.register_buffer(
             "frag_x",
             frag_batch.x
@@ -713,7 +529,7 @@ class GINFragmentEncoder_JK1(nn.Module):
 
 
 
-class Model_F1_C_S2_new(nn.Module):
+class MMQF(nn.Module):
     """F1 (JK) + C (MultiQuery) + S2 (Dense)"""
     def __init__(self, args, frag_graphs, node_feat_dim=6, edge_feat_dim=5,
                  frag_hidden_dim=128, frag_output_dim=256,
@@ -802,295 +618,3 @@ class Model_F1_C_S2_new(nn.Module):
 
 
 
-
-
-
-
-
-
-# ============================================================
-# 消融实验公共组件
-# ============================================================
-
-class AblationBase(nn.Module):
-    def _predict(self, node_emb, triples):
-        triples = triples.long()
-        return self.predictor(node_emb[triples[:, 0]], node_emb[triples[:, 1]])
-
-
-# ============================================================
-# 1. w/o Fragment
-# 删除：JK-GIN、Cross-Attention、Fragment-Graph CL
-# 保留：MolFormer、增强拓扑、R-GCN、Semantic-Graph CL
-# ============================================================
-
-class Model_WO_Fragment(AblationBase):
-    def __init__(self, args, frag_graphs=None, node_feat_dim=6, edge_feat_dim=5, frag_hidden_dim=128, frag_output_dim=256, cross_hidden_dim=256, cross_heads=4, num_queries=4):
-        super().__init__()
-        self.semantic_encoder = SemanticEncoderV3_Dense(input_dim=args.smiles_input_dim, hidden_dim=args.hidden_dim, dropout=args.dropout)
-        self.rgcn = R_GCN(num_feat=1792, num_hidden=args.hidden_dim, num_outputs=args.out_dim, dropout=args.dropout, rels=args.rels + 1)
-        self.projection = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Dropout(args.dropout), nn.Linear(512, args.out_dim), nn.LayerNorm(args.out_dim))
-        self.predictor = EnhancedPairPredictor(input_dim=args.out_dim, num_classes=args.rels, dropout=args.dropout)
-        self.sem_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-        self.graph_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-
-    def forward(self, edge_index, edge_type, smiles_matrix, fragment_indices, fragment_idfs, fragment_mask, triples):
-        h_sem, _ = self.semantic_encoder(smiles_matrix)
-        h_graph = self.rgcn(h_sem, edge_index, edge_type)
-        node_emb = self.projection(h_graph)
-        return self._predict(node_emb, triples), (self.sem_cons_proj(h_sem), self.graph_cons_proj(h_graph), None, None, None)
-
-
-# ============================================================
-# 2. w/o Cross-Attention
-# 保留片段编码，用简单线性投影+残差相加替代Cross-Attention
-# ============================================================
-
-class Model_WO_CrossAttention(AblationBase):
-    def __init__(self, args, frag_graphs, node_feat_dim=6, edge_feat_dim=5, frag_hidden_dim=128, frag_output_dim=256, cross_hidden_dim=256, cross_heads=4, num_queries=4):
-        super().__init__()
-        self.semantic_encoder = SemanticEncoderV3_Dense(input_dim=args.smiles_input_dim, hidden_dim=args.hidden_dim, dropout=args.dropout)
-        self.fragment_encoder = GINFragmentEncoder_JK1(frag_graphs=frag_graphs, node_feat_dim=node_feat_dim, edge_feat_dim=edge_feat_dim, hidden_dim=frag_hidden_dim, output_dim=frag_output_dim, dropout=args.dropout)
-        self.frag_fusion = nn.Sequential(nn.Linear(frag_output_dim, 1792), nn.LayerNorm(1792))
-        self.rgcn = R_GCN(num_feat=1792, num_hidden=args.hidden_dim, num_outputs=args.out_dim, dropout=args.dropout, rels=args.rels + 1)
-        self.projection = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Dropout(args.dropout), nn.Linear(512, args.out_dim), nn.LayerNorm(args.out_dim))
-        self.predictor = EnhancedPairPredictor(input_dim=args.out_dim, num_classes=args.rels, dropout=args.dropout)
-        self.sem_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-        self.graph_cons_proj = nn.Sequential(nn.Linear(1792, 512), nn.ELU(), nn.Linear(512, 256))
-        self.frag_cons_proj = nn.Sequential(nn.Linear(frag_output_dim, 512), nn.ELU(), nn.Linear(512, 256))
-
-    def forward(self, edge_index, edge_type, smiles_matrix, fragment_indices, fragment_idfs, fragment_mask, triples):
-        h_sem, _ = self.semantic_encoder(smiles_matrix)
-        frag_tokens, h_frag = self.fragment_encoder(fragment_indices, fragment_idfs, fragment_mask)
-        h_graph = self.rgcn(h_sem + self.frag_fusion(h_frag), edge_index, edge_type)
-        node_emb = self.projection(h_graph)
-        z_sem, z_graph, z_frag = self.sem_cons_proj(h_sem), self.graph_cons_proj(h_graph), self.frag_cons_proj(h_frag)
-        return self._predict(node_emb, triples), (z_sem, z_graph, z_frag, None, None)
-
-
-# ============================================================
-# 3. w/o Topology Augmentation
-# 模型结构与完整模型相同，main中改用original graph
-# ============================================================
-
-class Model_WO_TopologyAugmentation(Model_F1_C_S2_new):
-    pass
-
-
-# ============================================================
-# 4. w/o Consistency Learning
-# 模型结构与完整模型相同，main中只使用分类损失
-# ============================================================
-
-class Model_WO_ConsistencyLearning(Model_F1_C_S2_new):
-    pass
-
-
-
-class Model_WO_RGCN(AblationBase):
-    def __init__(self,args,frag_graphs,node_feat_dim=6,edge_feat_dim=5,frag_hidden_dim=128,frag_output_dim=256,cross_hidden_dim=256,cross_heads=4,num_queries=4):
-        super().__init__()
-        self.semantic_encoder=SemanticEncoderV3_Dense(input_dim=args.smiles_input_dim,hidden_dim=args.hidden_dim,dropout=args.dropout)
-        self.fragment_encoder=GINFragmentEncoder_JK1(frag_graphs=frag_graphs,node_feat_dim=node_feat_dim,edge_feat_dim=edge_feat_dim,hidden_dim=frag_hidden_dim,output_dim=frag_output_dim,dropout=args.dropout)
-        self.cross_fusion=MultiQueryCrossAttentionFusion(sem_dim=1792,frag_dim=frag_output_dim,hidden_dim=cross_hidden_dim,num_heads=cross_heads,num_queries=num_queries,dropout=args.dropout)
-
-        self.graph_mlp=nn.Sequential(
-            nn.Linear(1792,1792),
-            nn.LayerNorm(1792),
-            nn.ELU(),
-            nn.Dropout(args.dropout)
-        )
-
-
-        self.projection=nn.Sequential(nn.Linear(1792,512),nn.ELU(),nn.Dropout(args.dropout),nn.Linear(512,args.out_dim),nn.LayerNorm(args.out_dim))
-        self.predictor=EnhancedPairPredictor(input_dim=args.out_dim,num_classes=args.rels,dropout=args.dropout)
-        self.sem_cons_proj=nn.Sequential(nn.Linear(1792,512),nn.ELU(),nn.Linear(512,256))
-        self.graph_cons_proj=nn.Sequential(nn.Linear(1792,512),nn.ELU(),nn.Linear(512,256))
-        self.frag_cons_proj=nn.Sequential(nn.Linear(frag_output_dim,512),nn.ELU(),nn.Linear(512,256))
-
-
-    def forward(self,edge_index,edge_type,smiles_matrix,fragment_indices,fragment_idfs,fragment_mask,triples):
-        h_sem,_=self.semantic_encoder(smiles_matrix)
-        frag_tokens,h_frag=self.fragment_encoder(fragment_indices,fragment_idfs,fragment_mask)
-        h_fused,_=self.cross_fusion(h_sem,frag_tokens,fragment_mask)
-        # 删除R-GCN
-        h_graph=self.graph_mlp(h_fused)
-        node_emb=self.projection(h_graph)
-        z_sem=self.sem_cons_proj(h_sem)
-        z_graph=self.graph_cons_proj(h_graph)
-        z_frag=self.frag_cons_proj(h_frag)
-        return self._predict(node_emb,triples),(z_sem,z_graph,z_frag, None, None)
-
-
-
-
-class Model_WO_Pretrained(AblationBase):
-
-    def __init__(self,args,frag_graphs,node_feat_dim=6,edge_feat_dim=5,frag_hidden_dim=128,frag_output_dim=256,cross_hidden_dim=256,cross_heads=4,num_queries=4):
-        super().__init__()
-
-        self.semantic_encoder=SemanticEncoderV3_Dense(
-            input_dim=args.smiles_input_dim,
-            hidden_dim=args.hidden_dim,
-            dropout=args.dropout
-        )
-
-        self.fragment_encoder=GINFragmentEncoder_JK1(
-            frag_graphs=frag_graphs,
-            node_feat_dim=node_feat_dim,
-            edge_feat_dim=edge_feat_dim,
-            hidden_dim=frag_hidden_dim,
-            output_dim=frag_output_dim,
-            dropout=args.dropout
-        )
-
-        self.cross_fusion=MultiQueryCrossAttentionFusion(
-            sem_dim=1792,
-            frag_dim=frag_output_dim,
-            hidden_dim=cross_hidden_dim,
-            num_heads=cross_heads,
-            num_queries=num_queries,
-            dropout=args.dropout
-        )
-
-        self.rgcn=R_GCN(
-            num_feat=1792,
-            num_hidden=args.hidden_dim,
-            num_outputs=args.out_dim,
-            dropout=args.dropout,
-            rels=args.rels+1
-        )
-
-        self.projection=nn.Sequential(
-            nn.Linear(1792,512),
-            nn.ELU(),
-            nn.Dropout(args.dropout),
-            nn.Linear(512,args.out_dim),
-            nn.LayerNorm(args.out_dim)
-        )
-
-        self.predictor=EnhancedPairPredictor(
-            input_dim=args.out_dim,
-            num_classes=args.rels,
-            dropout=args.dropout
-        )
-
-        self.sem_cons_proj=nn.Sequential(
-            nn.Linear(1792,512),
-            nn.ELU(),
-            nn.Linear(512,256)
-        )
-
-        self.graph_cons_proj=nn.Sequential(
-            nn.Linear(1792,512),
-            nn.ELU(),
-            nn.Linear(512,256)
-        )
-
-        self.frag_cons_proj=nn.Sequential(
-            nn.Linear(frag_output_dim,512),
-            nn.ELU(),
-            nn.Linear(512,256)
-        )
-
-
-    def forward(self,edge_index,edge_type,smiles_matrix,fragment_indices,fragment_idfs,fragment_mask,triples):
-
-        h_sem,_=self.semantic_encoder(smiles_matrix)
-
-        frag_tokens,h_frag=self.fragment_encoder(
-            fragment_indices,
-            fragment_idfs,
-            fragment_mask
-        )
-
-        h_fused,_=self.cross_fusion(
-            h_sem,
-            frag_tokens,
-            fragment_mask
-        )
-
-        h_graph=self.rgcn(
-            h_fused,
-            edge_index,
-            edge_type
-        )
-
-        node_emb=self.projection(h_graph)
-
-        z_sem=self.sem_cons_proj(h_sem)
-        z_graph=self.graph_cons_proj(h_graph)
-        z_frag=self.frag_cons_proj(h_frag)
-
-        return self._predict(node_emb,triples),(z_sem,z_graph,z_frag, None, None)
-
-
-
-class Model_WO_MultiQuery(Model_F1_C_S2_new):
-
-    def __init__(self,args,frag_graphs,node_feat_dim=6,edge_feat_dim=5,frag_hidden_dim=128,frag_output_dim=256,cross_hidden_dim=256,cross_heads=4,num_queries=4):
-
-        super().__init__(
-            args,
-            frag_graphs,
-            node_feat_dim,
-            edge_feat_dim,
-            frag_hidden_dim,
-            frag_output_dim,
-            cross_hidden_dim,
-            cross_heads,
-            num_queries
-        )
-
-        self.cross_fusion=MultiQueryCrossAttentionFusion(
-            sem_dim=1792,
-            frag_dim=frag_output_dim,
-            hidden_dim=cross_hidden_dim,
-            num_heads=cross_heads,
-            num_queries=1,
-            dropout=args.dropout
-        )
-
-
-# ============================================================
-# Number of Queries parameter study
-# Query=1 is Model_WO_MultiQuery and Query=4 is Model_F1_C_S2_new.
-# These two variants complete the recommended {1, 2, 4, 8} setting.
-# ============================================================
-
-class Model_Query2(Model_F1_C_S2_new):
-    """Full model with two cross-attention queries."""
-
-    def __init__(self, args, frag_graphs, node_feat_dim=6, edge_feat_dim=5,
-                 frag_hidden_dim=128, frag_output_dim=256,
-                 cross_hidden_dim=256, cross_heads=4, num_queries=2):
-        super().__init__(
-            args=args,
-            frag_graphs=frag_graphs,
-            node_feat_dim=node_feat_dim,
-            edge_feat_dim=edge_feat_dim,
-            frag_hidden_dim=frag_hidden_dim,
-            frag_output_dim=frag_output_dim,
-            cross_hidden_dim=cross_hidden_dim,
-            cross_heads=cross_heads,
-            num_queries=2
-        )
-
-
-class Model_Query8(Model_F1_C_S2_new):
-    """Full model with eight cross-attention queries."""
-
-    def __init__(self, args, frag_graphs, node_feat_dim=6, edge_feat_dim=5,
-                 frag_hidden_dim=128, frag_output_dim=256,
-                 cross_hidden_dim=256, cross_heads=4, num_queries=8):
-        super().__init__(
-            args=args,
-            frag_graphs=frag_graphs,
-            node_feat_dim=node_feat_dim,
-            edge_feat_dim=edge_feat_dim,
-            frag_hidden_dim=frag_hidden_dim,
-            frag_output_dim=frag_output_dim,
-            cross_hidden_dim=cross_hidden_dim,
-            cross_heads=cross_heads,
-            num_queries=8
-        )
