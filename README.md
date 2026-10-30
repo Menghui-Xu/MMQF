@@ -5,7 +5,7 @@
 MMQF-DDI predicts multi-class drug–drug interactions (DDIs) by combining global molecular semantics, local BRICS fragment representations, and relational graph information. Its main components are:
 
 - Offline MolFormer molecular features and a densely connected semantic encoder.
-- A trainable JK-GIN encoder for BRICS fragment graphs.
+- A JK-GIN encoder for BRICS fragment graphs.
 - Semantic-conditioned multi-query cross-attention for global–local fusion.
 - A similarity-augmented drug graph and R-GCN for relational learning.
 - Semantic–graph and fragment–graph contrastive objectives, together with a drug-pair classifier.
