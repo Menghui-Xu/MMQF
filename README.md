@@ -72,7 +72,6 @@ Each split CSV contains `Drug1`, `Drug2`, and `Label`. Drug indices are zero-bas
 |---|---|
 | `Molformer_smiles_features.pt` | Offline molecular features, with one row per drug |
 | `molformer_sim_matrix.csv` | MolFormer cosine similarity matrix |
-| `chem_Jacarrd_sim.csv` | Loaded by the current entry point; not used in the fused similarity score |
 | `brics_weighted_similarity_matrix.npy` | IDF-weighted BRICS Jaccard similarity matrix |
 | `brics_fragments_data.pkl` | Per-drug fragments and fragment IDF weights |
 | `fragment_graph_data.pkl` | Fragment graphs and their exact vocabulary/index mapping |
